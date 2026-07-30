@@ -1,8 +1,8 @@
 //! This module provides platform related functions.
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "motor"))]
 #[cfg(feature = "events")]
-pub use self::unix::position;
+pub use self::ansi::position;
 #[cfg(windows)]
 #[cfg(feature = "events")]
 pub use self::windows::position;
@@ -15,6 +15,8 @@ pub(crate) use self::windows::{
 #[cfg(windows)]
 pub(crate) mod windows;
 
-#[cfg(unix)]
+/// `position()` is an `ESC[6n` round trip through the event reader, so it is
+/// shared by every backend that speaks ANSI rather than being UNIX-specific.
+#[cfg(any(unix, target_os = "motor"))]
 #[cfg(feature = "events")]
-pub(crate) mod unix;
+pub(crate) mod ansi;

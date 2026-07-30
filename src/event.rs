@@ -185,6 +185,25 @@ pub fn poll(timeout: Duration) -> std::io::Result<bool> {
     internal::poll(Some(timeout), &EventFilter)
 }
 
+/// Makes Ctrl+C available as a normal control-C key event.
+///
+/// Motor OS terminates a process on Ctrl+C unless it explicitly installs a
+/// handler. Calling this function installs that process-lifetime handler and
+/// adapts each notification into an [`Event::Key`] event. On other platforms,
+/// terminal input already supplies the event and this function does nothing.
+///
+/// Call this once during TUI setup, before the first [`read`] or [`EventStream`].
+#[cfg_attr(docsrs, doc(cfg(feature = "events")))]
+pub fn enable_ctrl_c_events() -> std::io::Result<()> {
+    #[cfg(target_os = "motor")]
+    {
+        source::motor::enable_ctrl_c_events()
+    }
+
+    #[cfg(not(target_os = "motor"))]
+    Ok(())
+}
+
 /// Reads a single [`Event`](enum.Event.html).
 ///
 /// This function blocks until an [`Event`](enum.Event.html) is available. Combine it with the
@@ -229,7 +248,7 @@ pub fn poll(timeout: Duration) -> std::io::Result<bool> {
 pub fn read() -> std::io::Result<Event> {
     match internal::read(&EventFilter)? {
         InternalEvent::Event(event) => Ok(event),
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "motor"))]
         _ => unreachable!(),
     }
 }
@@ -259,7 +278,7 @@ pub fn try_read() -> Option<Event> {
     match internal::try_read(&EventFilter) {
         Some(InternalEvent::Event(event)) => Some(event),
         None => None,
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "motor"))]
         _ => unreachable!(),
     }
 }
@@ -858,7 +877,7 @@ impl Display for KeyModifiers {
             first = false;
             match modifier {
                 KeyModifiers::SHIFT => f.write_str("Shift")?,
-                #[cfg(unix)]
+                #[cfg(any(unix, target_os = "motor"))]
                 KeyModifiers::CONTROL => f.write_str("Control")?,
                 #[cfg(windows)]
                 KeyModifiers::CONTROL => f.write_str("Ctrl")?,

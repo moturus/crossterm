@@ -69,6 +69,12 @@ serde = { version = "1.0.103", features = ["derive"], optional = true }
 crossterm_winapi = { version = "0.9.1", optional = true }
 winapi = { version = "0.3.9", optional = true, features = ["winuser", "winerror"] }
 
+# Motor OS dependencies.
+# Motor OS is neither `unix` nor `windows`; `moto-rt` is its native runtime API,
+# and the only OS dependency its backend needs.
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-rt = "0.17"
+
 # UNIX dependencies
 [target.'cfg(unix)'.dependencies]
 filedescriptor = { version = "0.8", optional = true }

@@ -6,17 +6,19 @@ pub(crate) trait Filter: Send + Sync + 'static {
     fn eval(&self, event: &InternalEvent) -> bool;
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "motor"))]
 #[derive(Debug, Clone)]
 pub(crate) struct CursorPositionFilter;
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "motor"))]
 impl Filter for CursorPositionFilter {
     fn eval(&self, event: &InternalEvent) -> bool {
         matches!(*event, InternalEvent::CursorPosition(_, _))
     }
 }
 
+// Only the UNIX backend queries the progressive keyboard enhancement protocol;
+// see `terminal::sys::unix::query_keyboard_enhancement_flags`.
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 pub(crate) struct KeyboardEnhancementFlagsFilter;
@@ -50,7 +52,7 @@ impl Filter for PrimaryDeviceAttributesFilter {
 pub(crate) struct EventFilter;
 
 impl Filter for EventFilter {
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     fn eval(&self, event: &InternalEvent) -> bool {
         matches!(*event, InternalEvent::Event(_))
     }

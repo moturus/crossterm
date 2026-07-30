@@ -1,5 +1,12 @@
 //! This module provides platform related functions.
 
+#[cfg(target_os = "motor")]
+#[cfg(feature = "events")]
+pub use self::motor::supports_keyboard_enhancement;
+#[cfg(target_os = "motor")]
+pub(crate) use self::motor::{
+    disable_raw_mode, enable_raw_mode, is_raw_mode_enabled, size, window_size,
+};
 #[cfg(unix)]
 #[cfg(feature = "events")]
 pub use self::unix::supports_keyboard_enhancement;
@@ -23,5 +30,9 @@ mod windows;
 
 #[cfg(unix)]
 pub mod file_descriptor;
+// The Motor OS terminal layer is portable Rust; compiling it under `cfg(test)`
+// everywhere keeps its unit tests in the normal test run.
+#[cfg(any(target_os = "motor", test))]
+pub(crate) mod motor;
 #[cfg(unix)]
 mod unix;

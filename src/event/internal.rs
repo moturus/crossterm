@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "motor"))]
 use crate::event::KeyboardEnhancementFlags;
 use crate::event::{Event, filter::Filter, read::InternalEventReader, timeout::PollTimeout};
 
@@ -14,6 +14,11 @@ pub(crate) fn lock_event_reader() -> MappedMutexGuard<'static, InternalEventRead
     MutexGuard::map(EVENT_READER.lock(), |reader| {
         reader.get_or_insert_with(InternalEventReader::default)
     })
+}
+
+#[cfg(target_os = "motor")]
+pub(crate) fn motor_waker() -> std::io::Result<crate::event::sys::Waker> {
+    lock_event_reader().try_waker()
 }
 
 fn try_lock_event_reader_for(
@@ -70,12 +75,22 @@ pub(crate) enum InternalEvent {
     /// An event.
     Event(Event),
     /// A cursor position (`col`, `row`).
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     CursorPosition(u16, u16),
     /// The progressive keyboard enhancement flags enabled by the terminal.
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     KeyboardEnhancementFlags(KeyboardEnhancementFlags),
     /// Attributes and architectural class of the terminal.
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     PrimaryDeviceAttributes,
+    /// DEC private mode 2048's current state.
+    #[cfg(any(target_os = "motor", test))]
+    ResizeModeStatus(u8),
+    /// A mode 2048 size report (`columns`, `rows`).
+    #[cfg(any(target_os = "motor", test))]
+    ResizeModeReport(u16, u16),
+    /// The answer to `CSI 18 t`, the size query that leaves the cursor where
+    /// the application put it (`columns`, `rows`).
+    #[cfg(any(target_os = "motor", test))]
+    TextAreaSize(u16, u16),
 }

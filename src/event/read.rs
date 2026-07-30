@@ -1,10 +1,12 @@
 use std::{collections::vec_deque::VecDeque, io, time::Duration};
 
+#[cfg(target_os = "motor")]
+use crate::event::source::motor::MotorInternalEventSource;
 #[cfg(unix)]
 use crate::event::source::unix::UnixInternalEventSource;
 #[cfg(windows)]
 use crate::event::source::windows::WindowsEventSource;
-#[cfg(feature = "event-stream")]
+#[cfg(any(feature = "event-stream", target_os = "motor"))]
 use crate::event::sys::Waker;
 use crate::event::{
     filter::Filter, internal::InternalEvent, source::EventSource, timeout::PollTimeout,
@@ -19,10 +21,12 @@ pub(crate) struct InternalEventReader {
 
 impl Default for InternalEventReader {
     fn default() -> Self {
-        #[cfg(windows)]
-        let source = WindowsEventSource::new();
+        #[cfg(target_os = "motor")]
+        let source = MotorInternalEventSource::new();
         #[cfg(unix)]
         let source = UnixInternalEventSource::new();
+        #[cfg(windows)]
+        let source = WindowsEventSource::new();
 
         let source = source.ok().map(|x| Box::new(x) as Box<dyn EventSource>);
 
@@ -39,6 +43,14 @@ impl InternalEventReader {
     #[cfg(feature = "event-stream")]
     pub(crate) fn waker(&self) -> Waker {
         self.source.as_ref().expect("reader source not set").waker()
+    }
+
+    #[cfg(target_os = "motor")]
+    pub(crate) fn try_waker(&self) -> io::Result<Waker> {
+        self.source
+            .as_ref()
+            .map(|source| source.waker())
+            .ok_or_else(|| io::Error::other("Failed to initialize input reader"))
     }
 
     pub(crate) fn poll<F>(&mut self, timeout: Option<Duration>, filter: &F) -> io::Result<bool>
@@ -145,7 +157,7 @@ mod tests {
     use std::io;
     use std::{collections::VecDeque, time::Duration};
 
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     use super::super::filter::CursorPositionFilter;
     use super::{super::Event, EventSource, Filter, InternalEvent, InternalEventReader};
 
@@ -191,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     fn test_poll_returns_true_for_matching_event_in_queue_at_back() {
         let mut reader = InternalEventReader {
             events: vec![
@@ -220,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     fn test_read_returns_matching_event_in_queue_at_back() {
         const CURSOR_EVENT: InternalEvent = InternalEvent::CursorPosition(10, 20);
 
@@ -234,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     fn test_read_does_not_consume_skipped_event() {
         const SKIPPED_EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
         const CURSOR_EVENT: InternalEvent = InternalEvent::CursorPosition(10, 20);
@@ -250,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     fn test_try_read_does_not_consume_skipped_event() {
         const SKIPPED_EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
         const CURSOR_EVENT: InternalEvent = InternalEvent::CursorPosition(10, 20);

@@ -1,9 +1,13 @@
 use std::{io, time::Duration};
 
 use super::internal::InternalEvent;
-#[cfg(feature = "event-stream")]
+#[cfg(any(feature = "event-stream", target_os = "motor"))]
 use super::sys::Waker;
 
+// The byte-stream rewriting in `motor::input` is pure logic; compiling it under
+// `cfg(test)` everywhere keeps its unit tests in the normal test run.
+#[cfg(any(target_os = "motor", test))]
+pub(crate) mod motor;
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(windows)]
@@ -22,6 +26,6 @@ pub(crate) trait EventSource: Sync + Send {
     fn try_read(&mut self, timeout: Option<Duration>) -> io::Result<Option<InternalEvent>>;
 
     /// Returns a `Waker` allowing to wake/force the `try_read` method to return `Ok(None)`.
-    #[cfg(feature = "event-stream")]
+    #[cfg(any(feature = "event-stream", target_os = "motor"))]
     fn waker(&self) -> Waker;
 }

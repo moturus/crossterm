@@ -186,6 +186,8 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
         b'?' => match buffer[buffer.len() - 1] {
             b'u' => return parse_csi_keyboard_enhancement_flags(buffer),
             b'c' => return parse_csi_primary_device_attributes(buffer),
+            #[cfg(any(target_os = "motor", test))]
+            b'y' => return parse_csi_resize_mode_status(buffer),
             _ => None,
         },
         b'0'..=b'9' => {
@@ -208,6 +210,8 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
                         b'~' => return parse_csi_special_key_code(buffer),
                         b'u' => return parse_csi_u_encoded_key_code(buffer),
                         b'R' => return parse_csi_cursor_position(buffer),
+                        #[cfg(any(target_os = "motor", test))]
+                        b't' => return parse_csi_size_report(buffer),
                         _ => return parse_csi_modifier_key_code(buffer),
                     }
                 }
@@ -217,6 +221,52 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
     };
 
     Ok(input_event.map(InternalEvent::Event))
+}
+
+#[cfg(any(target_os = "motor", test))]
+fn parse_csi_resize_mode_status(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
+    let body = buffer
+        .strip_prefix(b"\x1b[?2048;")
+        .and_then(|body| body.strip_suffix(b"$y"))
+        .ok_or_else(could_not_parse_event_error)?;
+    let status = std::str::from_utf8(body)
+        .map_err(|_| could_not_parse_event_error())?
+        .parse()
+        .map_err(|_| could_not_parse_event_error())?;
+    Ok(Some(InternalEvent::ResizeModeStatus(status)))
+}
+
+/// Parses the two size reports that end in `t`, which differ only in their
+/// leading selector: `48` is mode 2048's, sent unasked on every resize, and `8`
+/// is the answer to a `CSI 18 t` query. Both carry rows before columns.
+#[cfg(any(target_os = "motor", test))]
+fn parse_csi_size_report(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
+    let body = buffer
+        .strip_prefix(b"\x1b[")
+        .and_then(|body| body.strip_suffix(b"t"))
+        .and_then(|body| std::str::from_utf8(body).ok())
+        .ok_or_else(could_not_parse_event_error)?;
+    let mut fields = body.split(';');
+    let mut field = || {
+        fields
+            .next()
+            .and_then(|field| field.split(':').next())
+            .ok_or_else(could_not_parse_event_error)?
+            .parse::<u16>()
+            .map_err(|_| could_not_parse_event_error())
+    };
+
+    let selector = field()?;
+    let (rows, columns) = (field()?, field()?);
+    if rows == 0 || columns == 0 {
+        return Err(could_not_parse_event_error());
+    }
+    match selector {
+        48 => Ok(Some(InternalEvent::ResizeModeReport(columns, rows))),
+        8 => Ok(Some(InternalEvent::TextAreaSize(columns, rows))),
+        // Every other window operation reports something that is not a size.
+        _ => Err(could_not_parse_event_error()),
+    }
 }
 
 pub(crate) fn next_parsed<T>(iter: &mut dyn Iterator<Item = &str>) -> io::Result<T>
@@ -905,6 +955,32 @@ impl Default for Parser {
 }
 
 impl Parser {
+    /// Whether an escape sequence is half-buffered: it needs more bytes before
+    /// it can become an event, and the caller has not yet said none are coming.
+    #[cfg(any(target_os = "motor", test))]
+    pub(crate) fn is_mid_sequence(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
+    /// Finalizes a half-buffered sequence: nothing more is coming, so a lone
+    /// `ESC` is the Escape key and an unterminated sequence is junk to drop.
+    ///
+    /// A backend that learns a burst has ended from a short read says so with
+    /// `advance(.., false)`; this exists for backends that have to decide it on
+    /// a timer instead, because their input arrives a byte at a time.
+    #[cfg(any(target_os = "motor", test))]
+    pub(crate) fn flush(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        }
+
+        let held = std::mem::take(&mut self.buffer);
+        self.advance(&held, false);
+        // Whatever `advance` still holds incomplete never will be complete, now
+        // that it has been told nothing follows.
+        self.buffer.clear();
+    }
+
     /// Feeds `buffer` to the parser. `more` tells it that the caller already
     /// knows further bytes of the same burst are waiting, so an incomplete
     /// sequence must not be finalized yet.
@@ -1091,6 +1167,49 @@ mod tests {
             parse_csi_cursor_position(b"\x1B[20;10R").unwrap(),
             Some(InternalEvent::CursorPosition(9, 19))
         );
+    }
+
+    #[test]
+    fn test_resize_mode_responses() {
+        assert_eq!(
+            parse_event(b"\x1b[?2048;2$y", false).unwrap(),
+            Some(InternalEvent::ResizeModeStatus(2))
+        );
+        assert_eq!(
+            parse_event(b"\x1b[48:0;24:1;80:2;480;1600t", false).unwrap(),
+            Some(InternalEvent::ResizeModeReport(80, 24))
+        );
+    }
+
+    #[test]
+    fn test_text_area_size_response() {
+        // `CSI 8 ; rows ; cols t` answers `CSI 18 t`, and is told apart from a
+        // mode 2048 report by its selector alone -- both end in `t` and both
+        // put rows first.
+        assert_eq!(
+            parse_event(b"\x1b[8;24;80t", false).unwrap(),
+            Some(InternalEvent::TextAreaSize(80, 24))
+        );
+        // Zero is not a size, whichever report carries it.
+        assert!(parse_event(b"\x1b[8;0;80t", false).is_err());
+        assert!(parse_event(b"\x1b[8;24;0t", false).is_err());
+        // Other window operations report things that are not sizes at all: a
+        // position (`CSI 3 t`) must not be mistaken for one.
+        assert!(parse_event(b"\x1b[3;10;20t", false).is_err());
+    }
+
+    #[test]
+    fn test_resize_mode_rejects_invalid_character_dimensions() {
+        for report in [
+            b"\x1b[48;0;80;0;0t".as_slice(),
+            b"\x1b[48;24;0;0;0t",
+            b"\x1b[48;24;65536;0;0t",
+            b"\x1b[48;24;;0;0t",
+            b"\x1b[48;24t",
+            b"\x1b[48;rows;80;0;0t",
+        ] {
+            assert!(parse_event(report, false).is_err(), "{report:?}");
+        }
     }
 
     #[test]
@@ -1664,5 +1783,62 @@ mod tests {
                 KeyEventKind::Release,
             )))),
         );
+    }
+
+    #[test]
+    fn test_parser_assembles_a_sequence_from_single_bytes() {
+        let mut parser = Parser::default();
+
+        // One byte at a time, as a serial console delivers them.
+        for byte in b"\x1b[A" {
+            parser.advance(&[*byte], true);
+        }
+        assert!(!parser.is_mid_sequence());
+        assert_eq!(
+            parser.next(),
+            Some(InternalEvent::Event(Event::Key(KeyCode::Up.into())))
+        );
+    }
+
+    #[test]
+    fn test_parser_flush_finalizes_a_lone_escape() {
+        let mut parser = Parser::default();
+
+        parser.advance(b"\x1b", true);
+        assert!(parser.is_mid_sequence());
+        assert_eq!(parser.next(), None);
+
+        parser.flush();
+        assert!(!parser.is_mid_sequence());
+        assert_eq!(
+            parser.next(),
+            Some(InternalEvent::Event(Event::Key(KeyCode::Esc.into())))
+        );
+    }
+
+    #[test]
+    fn test_parser_flush_drops_an_unterminated_sequence() {
+        let mut parser = Parser::default();
+
+        parser.advance(b"\x1b[1;", true);
+        assert!(parser.is_mid_sequence());
+
+        parser.flush();
+        assert!(!parser.is_mid_sequence());
+        assert_eq!(parser.next(), None);
+    }
+
+    #[test]
+    fn test_parser_flush_without_a_held_sequence_does_nothing() {
+        let mut parser = Parser::default();
+
+        parser.advance(b"a", true);
+        assert_eq!(
+            parser.next(),
+            Some(InternalEvent::Event(Event::Key(KeyCode::Char('a').into())))
+        );
+
+        parser.flush();
+        assert_eq!(parser.next(), None);
     }
 }
