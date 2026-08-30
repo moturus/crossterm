@@ -37,8 +37,8 @@ const WAKE_TOKEN: poll::Token = 1;
 /// for — only `POLL_READABLE` may be registered — but both are delivered.
 const HANGUP: poll::EventBits = poll::POLL_READ_CLOSED | poll::POLL_ERROR;
 
-/// How long a half-arrived escape sequence is held before it is taken to be as
-/// finished as it will ever be.
+/// How long an incomplete escape sequence may remain idle before it is taken
+/// to be as finished as it will ever be.
 ///
 /// The serial console delivers input one byte per read, so `ESC [ A` arrives as
 /// three of them. A decoder that never waited would report every arrow key as
@@ -59,10 +59,9 @@ pub(crate) struct MotorInternalEventSource {
     coalescer: CrLfCoalescer,
     probe: SizeProbe,
     buffer: [u8; READ_BUFFER_SIZE],
-    /// When the parser first had a half-arrived sequence in hand, so that
-    /// [`ESCAPE_TIME`] is measured against a clock rather than against however
-    /// many times a wait happened to return.
-    holding_since: Option<Instant>,
+    /// When input last advanced an incomplete sequence. [`ESCAPE_TIME`] is an
+    /// inter-byte inactivity timeout, not a deadline for the whole sequence.
+    last_progress_at: Option<Instant>,
     waker: Waker,
 }
 
@@ -106,15 +105,15 @@ impl MotorInternalEventSource {
             // worth doing when there is one there.
             probe: SizeProbe::new(is_terminal),
             buffer: [0u8; READ_BUFFER_SIZE],
-            holding_since: None,
+            last_progress_at: None,
             waker,
         })
     }
 
-    /// How much longer the half-arrived sequence in the parser may be held, or
-    /// `None` if the parser is not holding one.
+    /// How much longer an incomplete sequence may remain idle, or `None` if
+    /// the parser is not holding one.
     fn escape_time_left(&self) -> Option<Duration> {
-        self.holding_since
+        self.last_progress_at
             .map(|since| (since + ESCAPE_TIME).saturating_duration_since(Instant::now()))
     }
 
@@ -146,11 +145,14 @@ impl MotorInternalEventSource {
         // decides when a sequence has waited long enough instead.
         self.parser.advance(&self.buffer[..kept], true);
 
-        if !self.parser.is_mid_sequence() {
-            self.holding_since = None;
-        } else if self.holding_since.is_none() {
-            self.holding_since = Some(Instant::now());
-        }
+        self.last_progress_at = if self.parser.is_mid_sequence() {
+            // A read may contain just one byte on the serial console. As long
+            // as input is making progress, give the rest of the sequence a
+            // full inactivity interval in which to arrive.
+            (kept != 0).then(Instant::now).or(self.last_progress_at)
+        } else {
+            None
+        };
 
         Ok(())
     }
@@ -212,7 +214,7 @@ impl EventSource for MotorInternalEventSource {
                 // Nothing followed within `ESCAPE_TIME`: that `ESC` was the
                 // Escape key, or that sequence is never going to finish.
                 self.parser.flush();
-                self.holding_since = None;
+                self.last_progress_at = None;
                 continue;
             }
 
